@@ -262,6 +262,49 @@ class TestGeneratedSystemdUnits:
 
         assert "SoftResourceLimits" not in plist
 
+    def test_launchd_plist_wraps_full_timestamped_command(
+        self, tmp_path, monkeypatch
+    ):
+        wrapper = tmp_path / "gate & reliability"
+        wrapper.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+        monkeypatch.setattr(
+            gateway_cli,
+            "read_raw_config",
+            lambda: {"gateway": {"launchd_wrapper": str(wrapper)}},
+        )
+
+        arguments = plistlib.loads(
+            gateway_cli.generate_launchd_plist().encode()
+        )["ProgramArguments"]
+
+        assert arguments[0] == str(wrapper)
+        assert arguments[1:4] == [
+            gateway_cli.get_python_path(),
+            "-m",
+            "hermes_cli.stderr_timestamp",
+        ]
+        assert arguments[-4:] == [
+            "gateway",
+            "run",
+            "--replace",
+            "--external-supervisor",
+        ]
+
+    @pytest.mark.parametrize("configured", ("relative", "", "missing"))
+    def test_launchd_plist_invalid_configured_wrapper_fails_closed(
+        self, tmp_path, monkeypatch, configured
+    ):
+        value = str(tmp_path / "missing") if configured == "missing" else configured
+        monkeypatch.setattr(
+            gateway_cli,
+            "read_raw_config",
+            lambda: {"gateway": {"launchd_wrapper": value}},
+        )
+
+        with pytest.raises(ValueError, match="launchd_wrapper"):
+            gateway_cli.generate_launchd_plist()
+
 
 
 class TestGatewayStopCleanup:

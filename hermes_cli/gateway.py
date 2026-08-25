@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from xml.sax.saxutils import escape as xml_escape
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -4827,11 +4828,38 @@ def generate_launchd_plist() -> str:
     # Build ProgramArguments array, including --profile when using a named profile.
     # The stderr wrapper preserves launchd's restart semantics while adding
     # timestamps to raw stderr lines before they land in gateway.error.log.
+    raw_config = read_raw_config()
+    gateway_config = (
+        raw_config.get("gateway", {}) if isinstance(raw_config, dict) else {}
+    )
+    launchd_wrapper = (
+        gateway_config.get("launchd_wrapper")
+        if isinstance(gateway_config, dict)
+        else None
+    )
+    wrapper_path = None
+    if launchd_wrapper is not None:
+        if not isinstance(launchd_wrapper, str) or not launchd_wrapper.strip():
+            raise ValueError(
+                "gateway.launchd_wrapper must be a non-empty absolute path"
+            )
+        wrapper_path = Path(launchd_wrapper).expanduser()
+        if (
+            not wrapper_path.is_absolute()
+            or not wrapper_path.is_file()
+            or not os.access(wrapper_path, os.X_OK)
+        ):
+            raise ValueError(
+                "gateway.launchd_wrapper must name an absolute executable file"
+            )
+
+    launch_command = _timestamped_stderr_gateway_command(
+        err_path, external_supervisor=True
+    )
+    if wrapper_path is not None:
+        launch_command.insert(0, str(wrapper_path))
     prog_args = [
-        f"<string>{part}</string>"
-        for part in _timestamped_stderr_gateway_command(
-            err_path, external_supervisor=True
-        )
+        f"<string>{xml_escape(str(part))}</string>" for part in launch_command
     ]
     prog_args_xml = "\n        ".join(prog_args)
 

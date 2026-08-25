@@ -2996,6 +2996,11 @@ DEFAULT_CONFIG = {
         # the historical serve-all behavior; [] serves only the default.
         "multiplex_profile_allowlist": None,
 
+        # Optional executable prepended to launchd's gateway command. This is
+        # an operator seam for durable pre-start compatibility checks; the
+        # generated plist validates it and fails closed if it is misconfigured.
+        "launchd_wrapper": None,
+
         # Durable delivery-obligation ledger: final agent responses are
         # recorded in state.db around the platform send, and a gateway that
         # died between finalize and platform ACK redelivers the stored
