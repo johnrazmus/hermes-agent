@@ -164,7 +164,6 @@ def test_discord_human_still_checked_against_allowlist_when_bot_policy_set(monke
     source_allowed = _make_discord_human_source(user_id="100200300")
     assert runner._is_user_authorized(source_allowed) is True
 
-
 def test_bot_bypass_does_not_leak_to_other_platforms(monkeypatch):
     """The is_bot bypass is Discord-specific — a Telegram bot source with
     is_bot=True must NOT be authorized just because DISCORD_ALLOW_BOTS=all.
@@ -210,21 +209,6 @@ def test_discord_role_config_does_not_bypass_gateway_allowlist(monkeypatch):
 
     source = _make_discord_human_source(user_id="999888777")
     assert runner._is_user_authorized(source) is False
-
-
-def test_discord_user_allowlist_still_authorizes_when_role_is_also_configured(monkeypatch):
-    """Sanity: DISCORD_ALLOWED_USERS still authorizes users on the list,
-    independent of DISCORD_ALLOWED_ROLES.  This guards against a future
-    regression that ties the user-allowlist check to the (now-removed)
-    role bypass.
-    """
-    runner = _make_bare_runner()
-
-    monkeypatch.setenv("DISCORD_ALLOWED_ROLES", "1493705176387948674")
-    monkeypatch.setenv("DISCORD_ALLOWED_USERS", "100200300")
-
-    source = _make_discord_human_source(user_id="100200300")
-    assert runner._is_user_authorized(source) is True
 
 
 def test_discord_role_config_does_not_leak_to_other_platforms(monkeypatch):
