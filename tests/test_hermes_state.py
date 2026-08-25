@@ -104,6 +104,31 @@ def _no_fts_rebuild_throttle(monkeypatch):
 
 
 class TestConnectionLifecycle:
+    def test_disabling_trigram_removes_existing_schema(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        first = SessionDB(db_path=db_path)
+        try:
+            if not first._trigram_available:
+                pytest.skip("this SQLite build has no trigram tokenizer")
+        finally:
+            first.close()
+
+        (tmp_path / "config.yaml").write_text(
+            "sessions:\n  trigram_enabled: false\n",
+            encoding="utf-8",
+        )
+        reopened = SessionDB(db_path=db_path)
+        try:
+            assert reopened._trigram_available is False
+            objects = reopened._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE name = 'messages_fts_trigram' "
+                "OR name LIKE 'messages_fts_trigram_%'"
+            ).fetchall()
+            assert objects == []
+        finally:
+            reopened.close()
+
     def test_failed_writable_open_does_not_leak_tracked_connection(
         self, tmp_path, monkeypatch
     ):
@@ -2920,6 +2945,33 @@ class TestVacuum:
         assert result["vacuumed"] is True
         assert vacuum_calls == [True]
         assert db.get_meta("last_vacuum") is not None
+
+    def test_auto_maintenance_applies_source_specific_retention(
+        self, db, monkeypatch
+    ):
+        db.create_session(session_id="cli-session", source="cli")
+        db.create_session(session_id="discord-session", source="discord")
+        calls = []
+
+        def record_prune(**kwargs):
+            calls.append(kwargs)
+            return 1
+
+        monkeypatch.setattr(db, "prune_sessions", record_prune)
+
+        result = db.maybe_auto_prune_and_vacuum(
+            retention_days=90,
+            retention_days_by_source={"cli": 2, "discord": 7},
+            min_interval_hours=0,
+            vacuum=False,
+        )
+
+        assert result["pruned"] == 2
+        assert result["pruned_by_source"] == {"cli": 1, "discord": 1}
+        assert {
+            (call["source"], call["older_than_days"])
+            for call in calls
+        } == {("cli", 2.0), ("discord", 7.0)}
 
     def test_auto_maintenance_skips_recent_vacuum(self, db, monkeypatch):
         monkeypatch.setattr(db, "prune_sessions", lambda **_kwargs: 3)

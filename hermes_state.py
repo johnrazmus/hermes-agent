@@ -52,6 +52,7 @@ from agent.skill_commands import (
     describe_skill_invocation,
 )
 from hermes_constants import get_hermes_home
+from session_policy import SessionPolicy, load_session_policy
 from hermes_cli.sqlite_runtime import (
     is_sqlite_wal_reset_vulnerable as _is_sqlite_wal_reset_vulnerable,
 )
@@ -4178,6 +4179,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # live-DB test-isolation guard block near _default_db_path().
         _ensure_test_isolation(self.db_path)
         self.read_only = read_only
+        self.session_policy: SessionPolicy = load_session_policy(self.db_path.parent)
+        self._trigram_enabled = self.session_policy.trigram_enabled
 
         self._lock = threading.Lock()
         # Read-path split (WAL only): recall/browse queries borrow a
@@ -4298,7 +4301,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     self._fts_enabled = (
                         self._fts_table_probe(cursor, "messages_fts") is True
                     )
-                    if self._fts_enabled:
+                    if self._fts_enabled and self._trigram_enabled:
                         self._trigram_available = (
                             self._fts_table_probe(
                                 cursor,
@@ -14389,6 +14392,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     def maybe_auto_prune_and_vacuum(
         self,
         retention_days: int = 90,
+        retention_days_by_source: Optional[Dict[str, float]] = None,
         min_interval_hours: int = 24,
         vacuum: bool = True,
         sessions_dir: Optional[Path] = None,
@@ -14416,7 +14420,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
           - ``"vacuumed"`` (bool) — true if VACUUM ran
           - ``"error"`` (str, optional) — present only on failure
         """
-        result: Dict[str, Any] = {"skipped": False, "pruned": 0, "vacuumed": False}
+        result: Dict[str, Any] = {
+            "skipped": False,
+            "pruned": 0,
+            "pruned_by_source": {},
+            "vacuumed": False,
+        }
         try:
             # Skip if another process/call did maintenance recently.
             last_raw = self.get_meta("last_auto_prune")
@@ -14430,10 +14439,41 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 except (TypeError, ValueError):
                     pass  # corrupt meta; treat as no prior run
 
-            pruned = self.prune_sessions(
-                older_than_days=retention_days,
-                sessions_dir=sessions_dir,
-            )
+            source_policy: Dict[str, float] = {}
+            for raw_source, raw_days in (retention_days_by_source or {}).items():
+                source = str(raw_source).strip().lower()
+                try:
+                    days = float(raw_days)
+                except (TypeError, ValueError):
+                    continue
+                if source and days > 0:
+                    source_policy[source] = days
+
+            if source_policy:
+                with self._lock:
+                    sources = [
+                        row["source"]
+                        for row in self._conn.execute(
+                            "SELECT DISTINCT source FROM sessions "
+                            "WHERE source IS NOT NULL"
+                        ).fetchall()
+                    ]
+                pruned = 0
+                for source in sources:
+                    source_pruned = self.prune_sessions(
+                        older_than_days=source_policy.get(
+                            source.lower(), retention_days
+                        ),
+                        source=source,
+                        sessions_dir=sessions_dir,
+                    )
+                    result["pruned_by_source"][source] = source_pruned
+                    pruned += source_pruned
+            else:
+                pruned = self.prune_sessions(
+                    older_than_days=retention_days,
+                    sessions_dir=sessions_dir,
+                )
             result["pruned"] = pruned
 
             # Only VACUUM if we actually freed rows, and no more often than
@@ -14464,7 +14504,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
             if pruned > 0:
                 logger.info(
-                    "state.db auto-maintenance: pruned %d session(s) inactive for %d days%s",
+                    "state.db auto-maintenance: pruned %d session(s) using retention policy %s%s",
                     pruned,
                     retention_days,
                     " + VACUUM" if result["vacuumed"] else "",

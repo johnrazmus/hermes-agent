@@ -219,10 +219,9 @@ class SessionSchemaMixin:
         # destructive candidates so the legacy branch never drops a trigger
         # it does not recreate.
         legacy_layout = self._db_has_legacy_inline_fts(cursor)
-        update_names = (
-            "messages_fts_update",
-            "messages_fts_trigram_update",
-        )
+        update_names = ("messages_fts_update",)
+        if self._trigram_enabled:
+            update_names += ("messages_fts_trigram_update",)
         if not legacy_layout and hasattr(self, "_ensure_fts_cjk_schema"):
             update_names += ("messages_fts_cjk_update",)
         placeholders = ", ".join("?" for _ in update_names)
@@ -249,14 +248,16 @@ class SessionSchemaMixin:
         # Choose legacy vs v23 the same way _init_schema does.
         if legacy_layout:
             self._ensure_fts_schema(cursor, "messages_fts", LEGACY_FTS_SQL)
-            self._ensure_fts_schema(
-                cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL
-            )
+            if self._trigram_enabled:
+                self._ensure_fts_schema(
+                    cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL
+                )
         else:
             self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
-            self._ensure_fts_schema(
-                cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
-            )
+            if self._trigram_enabled:
+                self._ensure_fts_schema(
+                    cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                )
             # CJK triggers live on the host SessionDB; only recreate one that
             # this migration actually dropped. ``_ensure_fts_cjk_schema`` is
             # documented never-raises and soft-fails OperationalError by
@@ -1038,7 +1039,11 @@ class SessionSchemaMixin:
             # backfills, index changes tied to a specific version step) stay
             # in a version-gated chain. Column additions are handled by
             # _reconcile_columns() above and no longer need entries here.
-            if current_version < 10 and SCHEMA_VERSION == 10:
+            if (
+                current_version < 10
+                and SCHEMA_VERSION == 10
+                and self._trigram_enabled
+            ):
                 # v10: trigram FTS5 table for CJK/substring search. The
                 # virtual table + triggers are created unconditionally via
                 # FTS_TRIGRAM_SQL below, but existing rows need a one-time
@@ -1343,6 +1348,13 @@ class SessionSchemaMixin:
         except sqlite3.OperationalError:
             pass  # Index already exists
 
+        if not self._trigram_enabled:
+            for trigger in _FTS_TRIGRAM_TRIGGERS:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            cursor.execute("DROP TABLE IF EXISTS messages_fts_trigram")
+            cursor.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+            self._trigram_available = False
+
         if fts5_available:
             # FTS5 setup. Run the DDL even when the virtual table exists so
             # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
@@ -1383,20 +1395,22 @@ class SessionSchemaMixin:
                 self._fts_enabled = self._ensure_fts_schema(
                     cursor, "messages_fts", LEGACY_FTS_SQL
                 )
-                if self._fts_enabled:
+                trigram_enabled = False
+                if self._fts_enabled and self._trigram_enabled:
                     trigram_enabled = self._ensure_fts_schema(
                         cursor, "messages_fts_trigram", LEGACY_FTS_TRIGRAM_SQL
                     )
-                    self._trigram_available = trigram_enabled
-                    if base_triggers_missing or (
-                        trigram_enabled and trigram_triggers_missing
-                    ):
-                        self._run_admitted_startup_rebuild(
-                            cursor,
-                            lambda: self._rebuild_legacy_fts_indexes(
-                                cursor, include_trigram=trigram_enabled
-                            ),
-                        )
+                self._trigram_available = trigram_enabled
+                if self._fts_enabled and (
+                    base_triggers_missing
+                    or (trigram_enabled and trigram_triggers_missing)
+                ):
+                    self._run_admitted_startup_rebuild(
+                        cursor,
+                        lambda: self._rebuild_legacy_fts_indexes(
+                            cursor, include_trigram=trigram_enabled
+                        ),
+                    )
             else:
                 # Same split as the legacy branch above, same reason.
                 base_triggers_missing = (
@@ -1414,21 +1428,26 @@ class SessionSchemaMixin:
                 # Trigram FTS5 for CJK/substring search. This is optional
                 # relative to the main FTS table; if it cannot be created,
                 # CJK search falls back to LIKE.
-                if self._fts_enabled:
+                if self._fts_enabled and self._trigram_enabled:
                     trigram_enabled = self._ensure_fts_schema(
                         cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                     )
                     self._trigram_available = trigram_enabled
-                    if base_triggers_missing or (
-                        trigram_enabled and trigram_triggers_missing
-                    ):
-                        self._run_admitted_startup_rebuild(
+                else:
+                    trigram_enabled = False
+                    self._trigram_available = False
+                if self._fts_enabled and (
+                    base_triggers_missing
+                    or (trigram_enabled and trigram_triggers_missing)
+                ):
+                    self._run_admitted_startup_rebuild(
+                        cursor,
+                        lambda: self._rebuild_fts_indexes(
                             cursor,
-                            lambda: self._rebuild_fts_indexes(
-                                cursor,
-                                include_trigram=trigram_enabled,
-                            ),
-                        )
+                            include_trigram=trigram_enabled,
+                        ),
+                    )
+                if self._fts_enabled:
                     # CJK-bigram index (cjk_unicode61). Strictly additive to
                     # the surfaces above and gated on the loadable tokenizer:
                     self._ensure_fts_cjk_schema(cursor)

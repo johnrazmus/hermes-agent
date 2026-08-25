@@ -7199,6 +7199,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Construction-time, before the loop serves traffic; sync DB is fine.
                     self._session_db._db.maybe_auto_prune_and_vacuum(
                         retention_days=int(_sess_cfg.get("retention_days", 90)),
+                        retention_days_by_source=dict(
+                            _sess_cfg.get("retention_days_by_source") or {}
+                        ),
                         min_interval_hours=int(_sess_cfg.get("min_interval_hours", 24)),
                         min_vacuum_interval_days=int(
                             _sess_cfg.get("min_vacuum_interval_days", 30)

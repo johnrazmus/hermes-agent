@@ -34,6 +34,7 @@ def test_cli_auto_maintenance_forwards_vacuum_interval(monkeypatch, tmp_path: Pa
 
     session_db.maybe_auto_prune_and_vacuum.assert_called_once_with(
         retention_days=90,
+        retention_days_by_source={},
         min_interval_hours=24,
         min_vacuum_interval_days=17,
         vacuum=True,

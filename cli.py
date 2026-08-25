@@ -2582,6 +2582,9 @@ def _run_state_db_auto_maintenance(session_db) -> None:
             return
         session_db.maybe_auto_prune_and_vacuum(
             retention_days=int(cfg.get("retention_days", 90)),
+            retention_days_by_source=dict(
+                cfg.get("retention_days_by_source") or {}
+            ),
             min_interval_hours=int(cfg.get("min_interval_hours", 24)),
             min_vacuum_interval_days=int(cfg.get("min_vacuum_interval_days", 30)),
             vacuum=bool(cfg.get("vacuum_after_prune", True)),
